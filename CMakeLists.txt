@@ -20,8 +20,11 @@ option(CS_BUILD_TOOLS "Build CLI tools" ON)
 set(CS_WARNINGS "")
 if(MSVC)
   set(CS_WARNINGS /W4 /WX)
-  add_compile_options(${CS_WARNINGS})
-  add_compile_options(/utf-8)
+  # Apply strict warnings to C++; forward the same flags to the host compiler of
+  # CUDA translation units so /W4 /WX (were meaningful) also apply there without
+  # confusing the nvcc option parser.
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/W4> $<$<COMPILE_LANGUAGE:CXX>:/WX> $<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
+  add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/W4> $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/WX> $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8> $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/wd4211>)
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 endif()
@@ -99,5 +102,11 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/CollectiveSchedulerConfig.cmake"
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/CollectiveScheduler)
 
 if(CS_ENABLE_CUDA)
+  enable_language(CUDA)
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 120)
+  endif()
+  set(CMAKE_CUDA_STANDARD 17)
+  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
   add_subdirectory(cuda)
 endif()
