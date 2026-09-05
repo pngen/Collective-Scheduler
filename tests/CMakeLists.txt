@@ -12,3 +12,11 @@ set(CS_TEST_AREAS basic readiness conflict overlap determinism deadline fairness
 foreach(area ${CS_TEST_AREAS})
   add_test(NAME cs_${area} COMMAND cs_tests ${area})
 endforeach()
+
+# Real multiprocess proof (coordinator + workers over real TCP).
+add_executable(multiprocess_proof multiprocess_proof.cpp)
+target_link_libraries(multiprocess_proof PRIVATE CollectiveScheduler::CollectiveScheduler)
+if(MSVC)
+  target_compile_options(multiprocess_proof PRIVATE /W4 /WX /utf-8)
+endif()
+add_test(NAME cs_mp_proof COMMAND multiprocess_proof "$<TARGET_FILE_DIR:cs_coordinator>")

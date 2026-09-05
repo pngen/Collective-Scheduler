@@ -31,6 +31,8 @@ set(CS_CORE_SOURCES
     src/conflict.cpp
     src/scheduler.cpp
     src/persistence.cpp
+    src/serialize.cpp
+    src/protocol.cpp
 )
 
 add_library(collective_scheduler STATIC ${CS_CORE_SOURCES})
@@ -44,6 +46,16 @@ if(MSVC)
   target_compile_options(collective_scheduler PRIVATE ${CS_WARNINGS})
   target_compile_options(collective_scheduler PRIVATE /utf-8)
   target_compile_options(collective_scheduler PRIVATE /bigobj)
+endif()
+
+# Reference multiprocess coordinator & worker (real TCP).
+add_executable(cs_coordinator src/coordinator_main.cpp src/coordinator.cpp)
+target_link_libraries(cs_coordinator PRIVATE CollectiveScheduler::CollectiveScheduler)
+add_executable(cs_worker src/worker.cpp)
+target_link_libraries(cs_worker PRIVATE CollectiveScheduler::CollectiveScheduler)
+if(MSVC)
+  target_compile_options(cs_coordinator PRIVATE /W4 /WX /utf-8)
+  target_compile_options(cs_worker PRIVATE /W4 /WX /utf-8)
 endif()
 
 if(CS_BUILD_TESTS)
@@ -61,6 +73,8 @@ if(CS_BUILD_TOOLS)
 endif()
 
 include(CMakePackageConfigHelpers)
+install(TARGETS cs_coordinator cs_worker RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+
 set(INSTALL_TARGETS collective_scheduler)
 install(TARGETS ${INSTALL_TARGETS}
         EXPORT CollectiveSchedulerTargets

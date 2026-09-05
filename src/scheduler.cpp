@@ -8,6 +8,7 @@
 #include <collective_scheduler/deterministic.hpp>
 #include <collective_scheduler/error.hpp>
 #include <collective_scheduler/persistence.hpp>
+#include <collective_scheduler/serialize.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -1001,64 +1002,6 @@ bool persist_enum_ok(LifecycleState v) noexcept {
   }
   return false;
 }
-void ser_req(PersistenceWriter& w, const CollectiveRequest& r) {
-  w.id(r.id.value); w.id(r.gen.value); w.id(r.collective.value); w.id(r.collective_gen.value);
-  w.u8(static_cast<std::uint8_t>(r.kind));
-  w.u64(r.payload_bytes);
-  w.u64(r.participants.size()); for (auto v : r.participants) w.id(v.value);
-  w.u64(r.participant_gens.size()); for (auto v : r.participant_gens) w.id(v.value);
-  w.u64(r.per_participant_payload.size()); for (auto v : r.per_participant_payload) w.u64(v);
-  w.id(r.plan_id.value); w.id(r.plan_gen.value);
-  w.u64(r.dependencies.size());
-  for (const auto& d : r.dependencies) { w.id(d.id.value); w.id(d.gen.value); w.u8(static_cast<std::uint8_t>(d.kind)); w.u8(static_cast<std::uint8_t>(d.provenance)); }
-  w.u64(r.resource_claims.size());
-  for (const auto& c : r.resource_claims) { w.id(c.resource.value); w.id(c.gen.value); w.f64(c.units); w.u8(c.exclusive ? 1 : 0); w.u8(static_cast<std::uint8_t>(c.provenance)); }
-  w.u64(r.exclusion_classes.size()); for (const auto& s2 : r.exclusion_classes) w.str(s2);
-  w.i32(r.priority.value); w.id(r.priority.gen.value); w.u8(r.priority.authoritative ? 1 : 0);
-  w.u64(r.window.earliest_start_ns); w.u64(r.window.latest_start_ns); w.u64(r.window.deadline_ns);
-  w.u64(r.window.expected_duration_ns); w.u64(r.window.slack_ns); w.u8(static_cast<std::uint8_t>(r.window.source));
-  w.u8(static_cast<std::uint8_t>(r.overlap));
-  w.u8(static_cast<std::uint8_t>(r.fairness_class));
-  w.u8(r.reservation_gen ? 1 : 0); if (r.reservation_gen) w.id(r.reservation_gen->value);
-  w.id(r.workload.value); w.id(r.workload_gen.value);
-  w.u8(static_cast<std::uint8_t>(r.queue_class));
-  w.u32(r.max_retries); w.u32(r.retry_count);
-  w.id(r.policy_gen.value);
-  w.u8(static_cast<std::uint8_t>(r.provenance));
-}
-CollectiveRequest de_req(PersistenceReader& r) {
-  CollectiveRequest q;
-  q.id = CollectiveRequestId(r.id()); q.gen = CollectiveRequestGeneration(r.id());
-  q.collective = CollectiveId(r.id()); q.collective_gen = CollectiveGeneration(r.id());
-  q.kind = static_cast<CollectiveKind>(r.u8());
-  q.payload_bytes = r.u64();
-  auto np = r.u64(); for (std::uint64_t i = 0; i < np; ++i) q.participants.push_back(ParticipantId(r.id()));
-  auto ng = r.u64(); for (std::uint64_t i = 0; i < ng; ++i) q.participant_gens.push_back(ParticipantGeneration(r.id()));
-  auto nb = r.u64(); for (std::uint64_t i = 0; i < nb; ++i) q.per_participant_payload.push_back(r.u64());
-  q.plan_id = CommunicationPlanId(r.id()); q.plan_gen = CommunicationPlanGeneration(r.id());
-  auto nd = r.u64(); for (std::uint64_t i = 0; i < nd; ++i) { DependencyRequirement d; d.id = DependencyId(r.id()); d.gen = DependencyGeneration(r.id()); d.kind = static_cast<DependencyKind>(r.u8()); d.provenance = static_cast<ProvenanceStatus>(r.u8()); q.dependencies.push_back(d); }
-  auto nc = r.u64(); for (std::uint64_t i = 0; i < nc; ++i) { ResourceClaim c; c.resource = ResourceId(r.id()); c.gen = ResourceGeneration(r.id()); c.units = r.f64(); c.exclusive = r.u8() != 0; c.provenance = static_cast<ProvenanceStatus>(r.u8()); q.resource_claims.push_back(c); }
-  auto ne = r.u64(); for (std::uint64_t i = 0; i < ne; ++i) q.exclusion_classes.push_back(r.str());
-  q.priority.value = r.i32(); q.priority.gen = PriorityGeneration(r.id()); q.priority.authoritative = r.u8() != 0;
-  q.window.earliest_start_ns = r.u64(); q.window.latest_start_ns = r.u64(); q.window.deadline_ns = r.u64();
-  q.window.expected_duration_ns = r.u64(); q.window.slack_ns = r.u64(); q.window.source = static_cast<ProvenanceStatus>(r.u8());
-  q.overlap = static_cast<OverlapMode>(r.u8()); q.fairness_class = static_cast<FairnessClass>(r.u8());
-  if (r.u8()) q.reservation_gen = ReservationGeneration(r.id());
-  q.workload = WorkloadId(r.id()); q.workload_gen = WorkloadGeneration(r.id());
-  q.queue_class = static_cast<QueueClass>(r.u8());
-  q.max_retries = r.u32(); q.retry_count = r.u32();
-  q.policy_gen = PolicyGeneration(r.id()); q.provenance = static_cast<ProvenanceStatus>(r.u8());
-  return q;
-}
-void ser_fair(PersistenceWriter& w, const FairnessAccount& f) {
-  w.u8(static_cast<std::uint8_t>(f.cls)); w.u64(f.observed_grants); w.f64(f.observed_service); w.f64(f.deficit);
-  w.u64(f.wait_ticks); w.u64(f.consecutive_bypasses); w.u8(f.starved ? 1 : 0); w.f64(f.target_share);
-}
-FairnessAccount de_fair(PersistenceReader& r) {
-  FairnessAccount f; f.cls = static_cast<FairnessClass>(r.u8()); f.observed_grants = r.u64(); f.observed_service = r.f64(); f.deficit = r.f64();
-  f.wait_ticks = r.u64(); f.consecutive_bypasses = r.u64(); f.starved = r.u8() != 0; f.target_share = r.f64();
-  return f;
-}
 }  // namespace
 
 void Scheduler::serializeState(PersistenceWriter& w) const {
@@ -1076,11 +1019,11 @@ void Scheduler::serializeState(PersistenceWriter& w) const {
   w.u64(impl_->records.size());
   for (const auto& [id, rec] : impl_->records) {
     (void)id;
-    ser_req(w, rec.request);
+    serialize_request(w, rec.request);
     w.u8(static_cast<std::uint8_t>(rec.lifecycle.state()));
     w.u64(rec.enqueue_seq);
     w.u64(rec.age_ticks);
-    ser_fair(w, rec.fairness);
+    serialize_fairness(w, rec.fairness);
   }
 }
 
@@ -1095,13 +1038,13 @@ void Scheduler::deserializeState(PersistenceReader& r) {
   recs.reserve(static_cast<std::size_t>(nrec));
   for (std::uint64_t i = 0; i < nrec; ++i) {
     Scheduler::Record rec;
-    rec.request = de_req(r);
+    rec.request = deserialize_request(r);
     auto lc = static_cast<LifecycleState>(r.u8());
     if (!persist_enum_ok(lc)) throw_malformed("invalid lifecycle enum in persistence");
     rec.lifecycle = Lifecycle(lc);
     rec.enqueue_seq = r.u64();
     rec.age_ticks = r.u64();
-    rec.fairness = de_fair(r);
+    rec.fairness = deserialize_fairness(r);
     recs.push_back(std::move(rec));
   }
   std::unique_lock l(impl_->mu);
