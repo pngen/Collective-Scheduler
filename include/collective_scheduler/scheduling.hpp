@@ -70,6 +70,18 @@ struct RevalidationRequirements {
   bool require_current_epoch = true;
 };
 
+// A priority-inversion event: a lower-priority ACTIVE collective is blocking a
+// higher-priority eligible collective. The scheduler never preempts; it emits a
+// typed action (DRAIN_CURRENT / DEFER_NEW_CONFLICTING_WORK / REQUEST_PREEMPTION).
+struct PriorityInversionEvent {
+  CollectiveRequestId holder;      // lower-priority ACTIVE collective
+  CollectiveRequestId requester;   // higher-priority blocked collective
+  PriorityInversionAction action = PriorityInversionAction::NO_ACTION;
+  std::int32_t holder_priority = 0;
+  std::int32_t requester_priority = 0;
+  EvidenceSnapshot evidence;
+};
+
 // A scheduling decision is NOT execution. It records which collective(s) the
 // scheduler selects now, their ordering, the overlap group, the grant
 // generations, the ranking factors, and the typed explanation.
@@ -83,6 +95,7 @@ struct ScheduleDecision {
   RevalidationRequirements revalidation;
   std::vector<FactorValue> ranking_factors;
   std::vector<CollectiveRequestId> fallback;      // next eligible order (deterministic)
+  std::vector<PriorityInversionEvent> priority_inversions;
   std::string explanation;
 };
 

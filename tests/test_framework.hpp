@@ -11,6 +11,7 @@
 #include <functional>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace cstest {
@@ -49,6 +50,7 @@ void eq(const A& a, const B& b, const char* file, int line, const char* ea, cons
 #define CHECK(cond) ::cstest::check((cond), __FILE__, __LINE__, #cond)
 #define REQUIRE(cond) do { if (!(cond)) { ::cstest::record(__FILE__, __LINE__, #cond); return; } } while (0)
 #define CHECK_EQ(a, b) ::cstest::eq((a), (b), __FILE__, __LINE__, #a, #b)
+#define CHECK_NEQ(a, b) CHECK(!((a) == (b)))
 
 using TestFn = std::function<void()>;
 struct TestCase { std::string name; TestFn fn; };

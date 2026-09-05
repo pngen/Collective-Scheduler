@@ -111,6 +111,7 @@ class Scheduler::Impl {
   EvidenceSnapshot make_snapshot() const;
   GrantAdjudication revalidate_grant(const CollectiveGrant& g);
   bool can_overlap(const Record& a, const Record& b) const;
+  void collect_priority_inversions(ScheduleDecision& dec) const;
   ScheduleDecision schedule();
   std::size_t active_conflicts(const Record& r) const;
   CollectiveGrant create_grant(Record& r, const EvidenceSnapshot& snap, const ScheduleDecision& dec);
@@ -218,6 +219,7 @@ Readiness Scheduler::Impl::compute_readiness(Record& r) const {
     if (!it->second.satisfied) return Readiness::WAITING_DEPENDENCY;
   }
   if (req.reservation_gen) {
+    if (*req.reservation_gen != reservation_gen) return Readiness::STALE;
     auto it = reservations.find(*req.reservation_gen);
     if (it == reservations.end()) return Readiness::WAITING_RESERVATION;
     if (!it->second.valid) return Readiness::WAITING_RESERVATION;
@@ -276,10 +278,9 @@ bool Scheduler::Impl::hard_eligible(const Record& r, std::vector<RejectionReason
     }
   }
   if (req.reservation_gen) {
+    if (*req.reservation_gen != reservation_gen) { reasons.push_back(RejectionReason::INVALID_RESERVATION); return false; }
     auto it = reservations.find(*req.reservation_gen);
-    if (it == reservations.end() || !it->second.valid) {
-      reasons.push_back(RejectionReason::INVALID_RESERVATION); return false;
-    }
+    if (it == reservations.end() || !it->second.valid) { reasons.push_back(RejectionReason::INVALID_RESERVATION); return false; }
   }
   if (congestion && congestion->hard_ceiling &&
       congestion->utilization >= congestion->hard_ceiling_utilization) {
@@ -321,9 +322,14 @@ std::vector<double> Scheduler::Impl::ranking_key(const Record& r) const {
   k.push_back(deadline * p.w_deadline);
   // [1] external priority.
   k.push_back(static_cast<double>(req.priority.value) / 100.0 * p.w_priority);
-  // [2] starvation pressure.
+  // [2] starvation pressure, with an explicit guaranteed anti-starvation
+  // promotion after max_bypass_count consecutive bypasses (a bounded,
+  // deterministic starvation-prevention guarantee that never violates hard
+  // safety — the collective must still be hard-eligible to be ranked at all).
   FairnessPolicy fp{0.05, p.aging_growth, p.max_bypass_count, p.fairness_window_grants, true};
-  k.push_back(starvation_pressure(r.fairness, fp) * p.w_starvation_risk);
+  double starv = starvation_pressure(r.fairness, fp);
+  if (r.fairness.consecutive_bypasses >= p.max_bypass_count) starv = 1000.0;
+  k.push_back(starv * p.w_starvation_risk);
   // [3] fairness deficit.
   double dfc = r.fairness.deficit; if (dfc > 1.0) dfc = 1.0;
   k.push_back(dfc * p.w_fairness_deficit);
@@ -379,7 +385,7 @@ GrantAdjudication Scheduler::Impl::revalidate_grant(const CollectiveGrant& g) {
     }
   }
   if (g.revalidation.require_fresh_reservation && rec.request.reservation_gen) {
-    if (!reservations.count(*rec.request.reservation_gen)) return GrantAdjudication::STALE_GRANT;
+    if (*rec.request.reservation_gen != reservation_gen) return GrantAdjudication::STALE_GRANT;
   }
   if (g.revalidation.require_fresh_congestion && congestion &&
       congestion->gen.value != g.evidence.congestion_gen.value)
@@ -467,6 +473,34 @@ CollectiveGrant Scheduler::Impl::create_grant(Record& r, const EvidenceSnapshot&
   return g;
 }
 
+void Scheduler::Impl::collect_priority_inversions(ScheduleDecision& dec) const {
+  for (auto req_id : dec.fallback) {
+    auto rit = records.find(req_id);
+    if (rit == records.end()) continue;
+    const Record& req_rec = rit->second;
+    if (!req_rec.request.priority.authoritative) continue;
+    for (const auto& [gid, gs] : grants) {
+      (void)gid;
+      if (!gs.active || gs.terminal) continue;
+      auto hit = records.find(gs.grant.request);
+      if (hit == records.end()) continue;
+      const Record& holder = hit->second;
+      if (holder.request.priority.value >= req_rec.request.priority.value) continue;
+      auto cr = classify_conflict(req_rec.footprint, holder.footprint);
+      if (!cr.forbids_overlap()) continue;
+      PriorityInversionEvent ev;
+      ev.holder = holder.request.id;
+      ev.requester = req_rec.request.id;
+      ev.holder_priority = holder.request.priority.value;
+      ev.requester_priority = req_rec.request.priority.value;
+      ev.evidence = make_snapshot();
+      bool urgent = req_rec.request.window.deadline_ns != 0 &&
+                    req_rec.request.window.deadline_ns <= now.value() + req_rec.request.window.expected_duration_ns * 2;
+      ev.action = urgent ? PriorityInversionAction::REQUEST_PREEMPTION : PriorityInversionAction::DRAIN_CURRENT;
+      dec.priority_inversions.push_back(ev);
+    }
+  }
+}
 ScheduleDecision Scheduler::Impl::schedule() {
   ScheduleDecision dec;
   dec.id = next_schedule_id++;
@@ -530,12 +564,28 @@ ScheduleDecision Scheduler::Impl::schedule() {
   }
 
   // Deterministic rank.
-  struct Ranked { CollectiveRequestId id; std::vector<double> key; std::uint64_t seq; };
+  // Named ranking factors are combined into an explicit weighted scale (the
+  // weights are named and configurable in PolicyConfig; they are NOT one opaque
+  // scalar). The same factors are returned verbatim in the decision for
+  // explanation and inspection. Summing lets fairness/starvation pressure trade
+  // off against priority/deadline instead of a single factor dominating.
+  struct Ranked { CollectiveRequestId id; std::vector<double> key; double score = 0.0; std::uint64_t seq; };
   std::vector<Ranked> rankedList;
-  for (auto id : candidates) rankedList.push_back({id, ranking_key(records[id]), records[id].enqueue_seq});
-  std::stable_sort(rankedList.begin(), rankedList.end(), [](const Ranked& a, const Ranked& b) {
+  for (auto id : candidates) {
+    auto key = ranking_key(records[id]);
+    double s = 0.0;
+    for (auto v : key) s += v;
+    rankedList.push_back({id, std::move(key), s, records[id].enqueue_seq});
+  }
+  std::stable_sort(rankedList.begin(), rankedList.end(), [this](const Ranked& a, const Ranked& b) {
+    if (a.score != b.score) return a.score > b.score;
     int c = cmp_rank(a.key, b.key);
     if (c != 0) return c > 0;
+    // Content-based tie-break on the collective identity so that submission order
+    // cannot change the schedule; queue age / sequence are strictly later keys.
+    auto ca = records.at(a.id).request.collective.value;
+    auto cb = records.at(b.id).request.collective.value;
+    if (ca != cb) return ca < cb;
     if (a.seq != b.seq) return a.seq < b.seq;
     return a.id.value < b.id.value;
   });
@@ -612,6 +662,7 @@ ScheduleDecision Scheduler::Impl::schedule() {
     for (std::size_t i = 0; i < key.size() && i < 11; ++i) dec.ranking_factors.push_back({kinds[i], key[i], ProvenanceStatus::DERIVED});
   }
 
+  collect_priority_inversions(dec);
   dec.explanation = "collective " + std::to_string(dec.selected.size()) + " selected";
   return dec;
 }
@@ -757,7 +808,17 @@ CoordinatorEpoch Scheduler::coordinatorEpoch() const { std::shared_lock l(impl_-
 CapacityGeneration Scheduler::capacityGeneration() const { std::shared_lock l(impl_->mu); return impl_->capacity_gen; }
 CongestionGeneration Scheduler::congestionGeneration() const { std::shared_lock l(impl_->mu); return impl_->congestion_gen; }
 ReservationGeneration Scheduler::reservationGeneration() const { std::shared_lock l(impl_->mu); return impl_->reservation_gen; }
-ScheduleDecision Scheduler::schedule() { std::unique_lock l(impl_->mu); return impl_->schedule(); }
+ScheduleDecision Scheduler::schedule() {
+  ScheduleDecision dec;
+  { std::unique_lock l(impl_->mu); dec = impl_->schedule(); }
+  // Emit priority-inversion actions through the Preemption Fabric port AFTER
+  // releasing the scheduler lock (never invoke an external callback under lock).
+  auto pre = impl_->preemption;
+  for (auto& ev : dec.priority_inversions) {
+    if (pre) pre->request_preemption(ev.holder, ev.requester, ev.action);
+  }
+  return dec;
+}
 
 GrantAdjudication Scheduler::revalidateGrant(const CollectiveGrant& g) { std::unique_lock l(impl_->mu); return impl_->revalidate_grant(g); }
 
@@ -880,7 +941,13 @@ Scheduler::Info Scheduler::info() const {
   inf.reservation_gen = impl_->reservation_gen;
   inf.epoch = impl_->epoch;
   inf.now_ns = impl_->now.value();
-  std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { if (a.second != b.second) return a.second < b.second; return a.first.value < b.first.value; });
+  std::sort(v.begin(), v.end(), [this](const auto& a, const auto& b) {
+    auto ca = impl_->records.at(a.first).request.collective.value;
+    auto cb = impl_->records.at(b.first).request.collective.value;
+    if (ca != cb) return ca < cb;
+    if (a.second != b.second) return a.second < b.second;
+    return a.first.value < b.first.value;
+  });
   for (auto& e : v) inf.next_eligible.push_back(e.first);
   return inf;
 }
