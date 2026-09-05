@@ -40,6 +40,7 @@ set(CS_CORE_SOURCES
 
 add_library(collective_scheduler STATIC ${CS_CORE_SOURCES})
 add_library(CollectiveScheduler::CollectiveScheduler ALIAS collective_scheduler)
+set_target_properties(collective_scheduler PROPERTIES EXPORT_NAME CollectiveScheduler)
 target_include_directories(collective_scheduler
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
