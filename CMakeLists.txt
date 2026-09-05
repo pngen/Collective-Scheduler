@@ -30,6 +30,7 @@ endif()
 set(CS_CORE_SOURCES
     src/conflict.cpp
     src/scheduler.cpp
+    src/persistence.cpp
 )
 
 add_library(collective_scheduler STATIC ${CS_CORE_SOURCES})

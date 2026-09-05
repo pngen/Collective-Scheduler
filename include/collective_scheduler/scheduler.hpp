@@ -33,6 +33,9 @@
 
 namespace collective_scheduler {
 
+class PersistenceWriter;
+class PersistenceReader;
+
 class Scheduler {
  public:
   struct Options {
@@ -104,6 +107,10 @@ class Scheduler {
   struct Record;
   struct GrantState;
   std::shared_ptr<Impl> impl_;
+
+  // Persistence hooks; implemented in scheduler.cpp where Impl/Record are complete.
+  void serializeState(PersistenceWriter& w) const;
+  void deserializeState(PersistenceReader& r);
 };
 
 }  // namespace collective_scheduler
