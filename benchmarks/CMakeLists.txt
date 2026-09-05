@@ -1,1 +1,6 @@
-# Benchmarks are added in the benchmarks phase.
+add_executable(cs_bench bench.cpp)
+target_link_libraries(cs_bench PRIVATE CollectiveScheduler::CollectiveScheduler)
+if(MSVC)
+  target_compile_options(cs_bench PRIVATE /W4 /WX /utf-8 /bigobj)
+endif()
+add_test(NAME cs_benchmark COMMAND cs_bench)

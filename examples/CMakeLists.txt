@@ -1,1 +1,6 @@
-# Examples are added in the examples phase.
+add_executable(basic_schedule basic_schedule.cpp)
+target_link_libraries(basic_schedule PRIVATE CollectiveScheduler::CollectiveScheduler)
+if(MSVC)
+  target_compile_options(basic_schedule PRIVATE /W4 /WX /utf-8)
+endif()
+add_test(NAME cs_example_basic COMMAND basic_schedule)

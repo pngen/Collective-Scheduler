@@ -1,1 +1,6 @@
-# CLI tools are added in the tooling phase.
+add_executable(cs_inspect cs_inspect.cpp)
+target_link_libraries(cs_inspect PRIVATE CollectiveScheduler::CollectiveScheduler)
+if(MSVC)
+  target_compile_options(cs_inspect PRIVATE /W4 /WX /utf-8)
+endif()
+add_test(NAME cs_tool_inspect COMMAND cs_inspect)

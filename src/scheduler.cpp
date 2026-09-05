@@ -70,6 +70,9 @@ class Scheduler::Impl {
   std::optional<CapacityState> capacity;
   std::unordered_map<CollectiveGrantId, GrantState> grants;
   std::unordered_map<ParticipantId, std::set<CollectiveRequestId>> participant_requests;
+  // Active-grant index by participant: makes overlap conflict checking on active
+  // work O(footprint) instead of O(number of active grants).
+  std::unordered_map<ParticipantId, std::set<CollectiveGrantId>> active_by_participant;
 
   std::uint64_t next_seq = 0;
   CollectiveRequestId next_request_id{1};
@@ -115,6 +118,8 @@ class Scheduler::Impl {
   void collect_priority_inversions(ScheduleDecision& dec) const;
   ScheduleDecision schedule();
   std::size_t active_conflicts(const Record& r) const;
+  void index_active_grant(const CollectiveGrant& g);
+  void deindex_active_grant(const CollectiveGrant& g);
   CollectiveGrant create_grant(Record& r, const EvidenceSnapshot& snap, const ScheduleDecision& dec);
   void promote_to_granted(Record& r) const;
 };
@@ -415,16 +420,40 @@ bool Scheduler::Impl::can_overlap(const Record& a, const Record& b) const {
 }
 
 std::size_t Scheduler::Impl::active_conflicts(const Record& r) const {
+  // Indexed by participant: only consider active grants that share a participant
+  // with the candidate, so the common path is O(footprint) not O(active grants).
+  std::vector<CollectiveGrantId> candidates;
+  for (auto pid : r.request.participants) {
+    auto it = active_by_participant.find(pid);
+    if (it == active_by_participant.end()) continue;
+    for (auto gid : it->second) candidates.push_back(gid);
+  }
+  // Deduplicate grant ids (a grant may share multiple participants with r).
+  std::sort(candidates.begin(), candidates.end());
+  candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
   std::size_t n = 0;
-  for (const auto& [gid, gs] : grants) {
-    (void)gid;
-    if (!gs.active || gs.terminal) continue;
-    auto it = records.find(gs.grant.request);
+  for (auto gid : candidates) {
+    auto gs = grants.find(gid);
+    if (gs == grants.end() || !gs->second.active || gs->second.terminal) continue;
+    auto it = records.find(gs->second.grant.request);
     if (it == records.end()) continue;
     auto cr = classify_conflict(r.footprint, it->second.footprint);
     if (cr.forbids_overlap()) ++n;
   }
   return n;
+}
+
+void Scheduler::Impl::index_active_grant(const CollectiveGrant& g) {
+  for (auto pid : g.participants) active_by_participant[pid].insert(g.id);
+}
+
+void Scheduler::Impl::deindex_active_grant(const CollectiveGrant& g) {
+  for (auto pid : g.participants) {
+    auto it = active_by_participant.find(pid);
+    if (it == active_by_participant.end()) continue;
+    it->second.erase(g.id);
+    if (it->second.empty()) active_by_participant.erase(it);
+  }
 }
 
 void Scheduler::Impl::promote_to_granted(Record& r) const {
@@ -767,7 +796,7 @@ void Scheduler::supersede(CollectiveRequest req) {
   if (old.lifecycle.state() != LifecycleState::COMPLETED && old.lifecycle.state() != LifecycleState::CANCELLED) {
     try { old.lifecycle.transition(LifecycleState::SUPERSEDED); } catch (const scheduler_error&) { old.lifecycle = Lifecycle(LifecycleState::SUPERSEDED); }
   }
-  if (old_grant) { auto gs = impl_->grants.find(old_grant->id); if (gs != impl_->grants.end()) { gs->second.terminal = true; gs->second.active = false; } if (impl_->active_grants > 0) --impl_->active_grants; }
+  if (old_grant) { auto gs = impl_->grants.find(old_grant->id); if (gs != impl_->grants.end()) { impl_->deindex_active_grant(gs->second.grant); gs->second.terminal = true; gs->second.active = false; } if (impl_->active_grants > 0) --impl_->active_grants; }
   // Replace request in-place with new generation.
   Record nrec;
   nrec.request = std::move(req);
@@ -789,7 +818,7 @@ void Scheduler::cancel(CollectiveRequestId id) {
     if (is_terminal_state(rec.lifecycle.state())) return;  // exactly one terminal outcome
     if (rec.current_grant && impl_->grants.count(rec.current_grant->id)) {
       auto gs = impl_->grants.find(rec.current_grant->id);
-      if (!gs->second.terminal) { revoke = gs->second.grant; gs->second.terminal = true; if (gs->second.active && impl_->active_grants > 0) --impl_->active_grants; gs->second.active = false; }
+      if (!gs->second.terminal) { revoke = gs->second.grant; impl_->deindex_active_grant(gs->second.grant); gs->second.terminal = true; if (gs->second.active && impl_->active_grants > 0) --impl_->active_grants; gs->second.active = false; }
       fabric = impl_->fabric;
       release_wl = rec.request.workload; release = true;
     }
@@ -851,7 +880,7 @@ bool Scheduler::handoff(const CollectiveGrant& g) {
       if (gs != impl_->grants.end()) {
         bool isActive = (rec.lifecycle.state() == LifecycleState::ACTIVE);
         gs->second.active = isActive;
-        if (isActive) { ++impl_->active_grants; } else { revoke = true; }
+        if (isActive) { ++impl_->active_grants; impl_->index_active_grant(gs->second.grant); } else { revoke = true; }
       } else { revoke = true; }
     } else { revoke = true; }
   }
@@ -887,6 +916,7 @@ bool Scheduler::complete(const CollectiveGrant& g, const WorkerBootId& wb, const
     if (!boot_ok) return false;
     try { rec.lifecycle.transition(LifecycleState::COMPLETED); } catch (const scheduler_error&) { return false; }
     gstate.terminal = true; gstate.active = false; gstate.completed_by = wb; gstate.completed_by_source = sb;
+    impl_->deindex_active_grant(g);
     if (impl_->active_grants > 0) --impl_->active_grants;
     if (rec.current_grant) rec.current_grant->active = false;
     release_wl = rec.request.workload; release = true;
@@ -916,7 +946,7 @@ void Scheduler::fenceWorkerBoot(WorkerId worker, WorkerBootId boot) {
             default: break;
           }
         } catch (const scheduler_error&) {}
-        if (rec.current_grant) { auto gs = impl_->grants.find(rec.current_grant->id); if (gs != impl_->grants.end()) { gs->second.terminal = true; gs->second.active = false; } }
+        if (rec.current_grant) { auto gs = impl_->grants.find(rec.current_grant->id); if (gs != impl_->grants.end()) { impl_->deindex_active_grant(gs->second.grant); gs->second.terminal = true; gs->second.active = false; } }
       }
     }
   }
@@ -967,6 +997,7 @@ void Scheduler::resetDynamicStateForRecovery() {
   impl_->reservation_gen = ReservationGeneration(0);
   impl_->active_grants = 0;
   impl_->grants.clear();
+  impl_->active_by_participant.clear();
   for (auto& [id, rec] : impl_->records) {
     (void)id;
     auto st = rec.lifecycle.state();
@@ -1061,6 +1092,7 @@ void Scheduler::deserializeState(PersistenceReader& r) {
   impl_->records.clear();
   impl_->participant_requests.clear();
   impl_->grants.clear();
+  impl_->active_by_participant.clear();
   impl_->active_grants = 0;
   for (auto& rec : recs) {
     for (auto pid : rec.request.participants) impl_->participant_requests[pid].insert(rec.request.id);
